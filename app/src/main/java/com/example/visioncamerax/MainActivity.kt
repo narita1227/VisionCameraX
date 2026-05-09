@@ -42,6 +42,7 @@ import androidx.camera.view.PreviewView
 import com.example.visioncamerax.network.ServerConfig
 import com.example.visioncamerax.network.VideoWebSocketManager
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
@@ -51,6 +52,8 @@ class MainActivity : ComponentActivity() {
     private val wsManager = VideoWebSocketManager()
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val sentFrameCount = AtomicLong(0)
+    private val lastEncodeMs = AtomicLong(0)
+    private val lastSendMs = AtomicLong(0)
     private var hasCameraPermission by mutableStateOf(false)
 
     private val permissionLauncher = registerForActivityResult(
@@ -71,6 +74,7 @@ class MainActivity : ComponentActivity() {
             var statusText by remember { mutableStateOf("未接続") }
             var sendFps by remember { mutableStateOf("-") }
             var latencyMs by remember { mutableStateOf("-") }
+            var profileText by remember { mutableStateOf("変換ms: - / 送信ms: -") }
             var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
             var processedBitmap by remember { mutableStateOf<Bitmap?>(null) }
             val previewView = remember {
@@ -120,6 +124,7 @@ class MainActivity : ComponentActivity() {
                         Text(text = "送信FPS: $sendFps", color = Color.White)
                         Text(text = "処理遅延(ms): $latencyMs", color = Color.White)
                     }
+                    Text(text = profileText, color = Color.White)
                     Text(
                         text = "カメラ: ${if (lensFacing == CameraSelector.LENS_FACING_BACK) "背面" else "前面"}",
                         color = Color.White,
@@ -151,6 +156,7 @@ class MainActivity : ComponentActivity() {
                     val diff = count - lastCount
                     val sec = (now - last).coerceAtLeast(1)
                     sendFps = String.format("%.1f", diff * 1000.0 / sec)
+                    profileText = "変換ms: ${lastEncodeMs.get()} / 送信ms: ${lastSendMs.get()}"
                     last = now
                     lastCount = count
                 }
@@ -173,9 +179,18 @@ class MainActivity : ComponentActivity() {
 
             analysis.setAnalyzer(cameraExecutor) { imageProxy ->
                 try {
+                    val nowMs = System.currentTimeMillis()
                     val mirrorHorizontally = lensFacing == CameraSelector.LENS_FACING_FRONT
+                    val encodeStartNs = System.nanoTime()
                     val jpeg = imageProxyToJpeg(imageProxy, mirrorHorizontally) ?: return@setAnalyzer
-                    wsManager.sendFrame(jpeg, System.currentTimeMillis())
+                    val encodeMs = (System.nanoTime() - encodeStartNs) / 1_000_000
+
+                    val sendStartNs = System.nanoTime()
+                    wsManager.sendFrame(jpeg, nowMs)
+                    val sendMs = (System.nanoTime() - sendStartNs) / 1_000_000
+
+                    lastEncodeMs.set(encodeMs)
+                    lastSendMs.set(sendMs)
                     sentFrameCount.incrementAndGet()
                 } finally {
                     imageProxy.close()
@@ -193,18 +208,7 @@ class MainActivity : ComponentActivity() {
     private fun imageProxyToJpeg(image: ImageProxy, mirrorHorizontally: Boolean): ByteArray? {
         if (image.format != ImageFormat.YUV_420_888) return null
 
-        val yBuffer = image.planes[0].buffer
-        val uBuffer = image.planes[1].buffer
-        val vBuffer = image.planes[2].buffer
-
-        val ySize = yBuffer.remaining()
-        val uSize = uBuffer.remaining()
-        val vSize = vBuffer.remaining()
-
-        val nv21 = ByteArray(ySize + uSize + vSize)
-        yBuffer.get(nv21, 0, ySize)
-        vBuffer.get(nv21, ySize, vSize)
-        uBuffer.get(nv21, ySize + vSize, uSize)
+        val nv21 = yuv420888ToNv21(image)
 
         val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
         val tmp = ByteArrayOutputStream()
@@ -268,6 +272,60 @@ class MainActivity : ComponentActivity() {
         transformed.compress(Bitmap.CompressFormat.JPEG, 70, out)
         transformed.recycle()
         return out.toByteArray()
+    }
+
+    private fun yuv420888ToNv21(image: ImageProxy): ByteArray {
+        val width = image.width
+        val height = image.height
+        val out = ByteArray(width * height * 3 / 2)
+
+        copyPlane(
+            planeBuffer = image.planes[0].buffer,
+            rowStride = image.planes[0].rowStride,
+            pixelStride = image.planes[0].pixelStride,
+            width = width,
+            height = height,
+            out = out,
+            outOffset = 0,
+            outPixelStride = 1,
+        )
+
+        val chromaHeight = height / 2
+        val chromaWidth = width / 2
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+
+        var outputOffset = width * height
+        for (row in 0 until chromaHeight) {
+            val uRowStart = row * uPlane.rowStride
+            val vRowStart = row * vPlane.rowStride
+            for (col in 0 until chromaWidth) {
+                out[outputOffset++] = vPlane.buffer.get(vRowStart + col * vPlane.pixelStride)
+                out[outputOffset++] = uPlane.buffer.get(uRowStart + col * uPlane.pixelStride)
+            }
+        }
+
+        return out
+    }
+
+    private fun copyPlane(
+        planeBuffer: ByteBuffer,
+        rowStride: Int,
+        pixelStride: Int,
+        width: Int,
+        height: Int,
+        out: ByteArray,
+        outOffset: Int,
+        outPixelStride: Int,
+    ) {
+        var outputOffset = outOffset
+        for (row in 0 until height) {
+            val rowStart = row * rowStride
+            for (col in 0 until width) {
+                out[outputOffset] = planeBuffer.get(rowStart + col * pixelStride)
+                outputOffset += outPixelStride
+            }
+        }
     }
 
     private fun hasCameraPermission(): Boolean {
