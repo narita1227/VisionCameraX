@@ -1,7 +1,7 @@
-package com.example.visionusb.network
+package com.example.visioncamerax.network
 
 import android.os.Build
-import com.example.visionusb.BuildConfig
+import com.example.visioncamerax.BuildConfig
 
 object ServerConfig {
 

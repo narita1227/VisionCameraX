@@ -31,7 +31,7 @@ fun asBuildConfigString(value: String): String {
 }
 
 android {
-    namespace = "com.example.visionusb"
+    namespace = "com.example.visioncamerax"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -39,7 +39,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.visionusb"
+        applicationId = "com.example.visioncamerax"
         minSdk = 24
         targetSdk = 36
         versionCode = 1
@@ -53,8 +53,7 @@ android {
             asBuildConfigString(
                 configValue(
                     "10.0.2.2",
-                    "visioncamerax.server.emulatorHost",
-                    "visionusb.server.emulatorHost"
+                    "visioncamerax.server.emulatorHost"
                 )
             )
         )
@@ -64,8 +63,7 @@ android {
             asBuildConfigString(
                 configValue(
                     "192.168.1.20",
-                    "visioncamerax.server.realDeviceHost",
-                    "visionusb.server.realDeviceHost"
+                    "visioncamerax.server.realDeviceHost"
                 )
             )
         )
@@ -75,8 +73,7 @@ android {
             asBuildConfigString(
                 configValue(
                     "",
-                    "visioncamerax.server.host.override",
-                    "visionusb.server.host.override"
+                    "visioncamerax.server.host.override"
                 )
             )
         )
@@ -85,8 +82,7 @@ android {
             "SERVER_WS_PORT",
             configValue(
                 "8770",
-                "visioncamerax.server.wsPort",
-                "visionusb.server.wsPort"
+                "visioncamerax.server.wsPort"
             )
         )
     }

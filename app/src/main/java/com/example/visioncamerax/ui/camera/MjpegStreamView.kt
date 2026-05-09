@@ -1,4 +1,4 @@
-package com.example.visionusb.ui.camera
+package com.example.visioncamerax.ui.camera
 
 import android.content.Context
 import android.graphics.Bitmap

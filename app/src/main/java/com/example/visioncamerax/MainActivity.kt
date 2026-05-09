@@ -1,4 +1,4 @@
-package com.example.visionusb
+package com.example.visioncamerax
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -39,8 +39,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.camera.view.PreviewView
-import com.example.visionusb.network.ServerConfig
-import com.example.visionusb.network.VideoWebSocketManager
+import com.example.visioncamerax.network.ServerConfig
+import com.example.visioncamerax.network.VideoWebSocketManager
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors

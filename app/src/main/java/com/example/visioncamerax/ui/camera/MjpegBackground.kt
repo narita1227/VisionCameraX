@@ -1,4 +1,4 @@
-package com.example.visionusb.ui.camera
+package com.example.visioncamerax.ui.camera
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier

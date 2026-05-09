@@ -58,9 +58,11 @@ def process_frame(jpeg_b64: str) -> str | None:
 
         ok, encoded = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
         if not ok:
+            logger.warning("cv2.imencode returned false")
             return None
         return base64.b64encode(encoded.tobytes()).decode("ascii")
     except Exception:
+        logger.exception("process_frame failed")
         return None
 
 
@@ -108,6 +110,9 @@ async def ws_handler(websocket):
             await websocket.send(envelope("video_result", "python-server", seq, response))
     except ConnectionClosed:
         logger.info("client disconnected: %s", client)
+        return
+    except Exception:
+        logger.exception("ws_handler crashed for client=%s", client)
         return
 
 

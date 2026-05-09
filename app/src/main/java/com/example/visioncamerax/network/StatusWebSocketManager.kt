@@ -1,4 +1,4 @@
-package com.example.visionusb.network
+package com.example.visioncamerax.network
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -19,15 +19,21 @@ class VideoWebSocketManager {
 
     companion object {
         private const val TAG = "VideoWebSocketManager"
+        private const val RECONNECT_BASE_DELAY_MS = 1000L
+        private const val RECONNECT_MAX_DELAY_MS = 15000L
     }
 
     private val client = OkHttpClient()
     private val running = AtomicBoolean(false)
+    private val connected = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val frameSeq = AtomicLong(0L)
 
     @Volatile
     private var currentWebSocket: WebSocket? = null
+
+    @Volatile
+    private var workerThread: Thread? = null
 
     fun start(
         onStatus: (String) -> Unit,
@@ -35,11 +41,18 @@ class VideoWebSocketManager {
     ) {
         if (running.getAndSet(true)) return
 
-        Thread {
+        workerThread = Thread {
+            var reconnectDelayMs = RECONNECT_BASE_DELAY_MS
             while (running.get()) {
                 try {
+                    if (connected.get()) {
+                        Thread.sleep(500)
+                        continue
+                    }
+
                     val targetUrl = ServerConfig.videoWsUrl()
                     postStatus(onStatus, "接続試行中: $targetUrl")
+                    closeCurrentSocketQuietly()
 
                     val request = Request.Builder()
                         .url(targetUrl)
@@ -47,7 +60,10 @@ class VideoWebSocketManager {
 
                     val listener = object : WebSocketListener() {
                         override fun onOpen(webSocket: WebSocket, response: Response) {
+                            connected.set(true)
+                            reconnectDelayMs = RECONNECT_BASE_DELAY_MS
                             postStatus(onStatus, "接続中")
+                            Log.i(TAG, "WebSocket connected")
                         }
 
                         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -67,15 +83,21 @@ class VideoWebSocketManager {
                                         String.format("%.1f", latency)
                                     )
                                 }
-                            } catch (_: Exception) {
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to parse/process message", e)
                             }
                         }
 
                         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                            connected.set(false)
+                            currentWebSocket = null
                             postStatus(onStatus, "接続待ち (closed:$code)")
+                            Log.i(TAG, "WebSocket closed code=$code reason=$reason")
                         }
 
                         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                            connected.set(false)
+                            currentWebSocket = null
                             Log.w(TAG, "WebSocket failure", t)
                             val code = response?.code
                             if (code != null) {
@@ -87,16 +109,21 @@ class VideoWebSocketManager {
                     }
 
                     currentWebSocket = client.newWebSocket(request, listener)
-                    Thread.sleep(2000)
-                } catch (_: Exception) {
+                    Thread.sleep(reconnectDelayMs)
+                    reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(RECONNECT_MAX_DELAY_MS)
+                } catch (e: Exception) {
+                    connected.set(false)
+                    Log.w(TAG, "Reconnect loop failure", e)
                     postStatus(onStatus, "接続待ち")
-                    try {
-                        Thread.sleep(2000)
-                    } catch (_: InterruptedException) {
-                    }
+                    Thread.sleep(reconnectDelayMs)
+                    reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(RECONNECT_MAX_DELAY_MS)
                 }
             }
-        }.start()
+        }.apply {
+            name = "VideoWebSocketWorker"
+            isDaemon = true
+            start()
+        }
     }
 
     fun sendFrame(jpegBytes: ByteArray, captureTimestampMs: Long) {
@@ -114,14 +141,25 @@ class VideoWebSocketManager {
             put("payload", payload)
         }
 
-        ws.send(envelope.toString())
+        val sent = ws.send(envelope.toString())
+        if (!sent) {
+            Log.w(TAG, "sendFrame failed: websocket send returned false")
+        }
     }
 
     fun stop() {
         running.set(false)
+        connected.set(false)
+        workerThread?.interrupt()
+        workerThread = null
+        closeCurrentSocketQuietly()
+    }
+
+    private fun closeCurrentSocketQuietly() {
         try {
             currentWebSocket?.close(1000, null)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to close websocket", e)
         }
         currentWebSocket = null
     }
