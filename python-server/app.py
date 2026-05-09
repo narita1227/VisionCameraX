@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from collections import deque
 import json
 import logging
 import time
@@ -36,9 +37,8 @@ def envelope(msg_type: str, source: str, seq: int, payload: dict) -> str:
     )
 
 
-def process_frame(jpeg_b64: str) -> str | None:
+def process_frame_bytes(raw: bytes) -> bytes | None:
     try:
-        raw = base64.b64decode(jpeg_b64)
         arr = np.frombuffer(raw, dtype=np.uint8)
         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if frame is None:
@@ -60,22 +60,93 @@ def process_frame(jpeg_b64: str) -> str | None:
         if not ok:
             logger.warning("cv2.imencode returned false")
             return None
-        return base64.b64encode(encoded.tobytes()).decode("ascii")
+        return encoded.tobytes()
     except Exception:
         logger.exception("process_frame failed")
         return None
 
 
+def process_frame(jpeg_b64: str) -> bytes | None:
+    try:
+        raw = base64.b64decode(jpeg_b64)
+    except Exception:
+        logger.exception("base64 decode failed")
+        return None
+    return process_frame_bytes(raw)
+
+
+async def send_result_binary(
+    websocket,
+    seq: int,
+    processed_jpeg: bytes,
+    process_latency_ms: int,
+    capture_ts_ms: int | None,
+):
+    payload = {
+        "process_latency_ms": process_latency_ms,
+    }
+    if capture_ts_ms is not None:
+        payload["capture_ts_ms"] = capture_ts_ms
+
+    await websocket.send(envelope("video_result_meta", "python-server", seq, payload))
+    await websocket.send(processed_jpeg)
+
+
 async def ws_handler(websocket):
     frame_count = 0
+    pending_meta: deque[tuple[int, int | None]] = deque()
     client = getattr(websocket, "remote_address", None)
     logger.info("client connected: %s", client)
     try:
         async for raw in websocket:
+            if isinstance(raw, bytes):
+                if not pending_meta:
+                    logger.warning("received binary frame without metadata from %s", client)
+                    continue
+
+                seq, capture_ts_ms = pending_meta.popleft()
+                t0 = now_ms()
+                result_jpeg = process_frame_bytes(raw)
+                if result_jpeg is None:
+                    logger.warning("binary frame decode/process failed from %s (seq=%s)", client, seq)
+                    continue
+
+                frame_count += 1
+                if frame_count % 30 == 0:
+                    logger.info(
+                        "frames received=%d latest_seq=%d latest_latency_ms=%d",
+                        frame_count,
+                        seq,
+                        now_ms() - t0,
+                    )
+
+                await send_result_binary(
+                    websocket=websocket,
+                    seq=seq,
+                    processed_jpeg=result_jpeg,
+                    process_latency_ms=now_ms() - t0,
+                    capture_ts_ms=capture_ts_ms,
+                )
+                continue
+
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 logger.warning("invalid JSON from %s", client)
+                continue
+
+            if msg.get("type") == "video_frame_meta":
+                seq = int(msg.get("seq", 0))
+                payload = msg.get("payload", {})
+                capture_ts_ms = payload.get("capture_ts_ms")
+                if isinstance(capture_ts_ms, (int, float)):
+                    capture_ts_ms = int(capture_ts_ms)
+                else:
+                    capture_ts_ms = None
+
+                pending_meta.append((seq, capture_ts_ms))
+                if len(pending_meta) > 8:
+                    logger.warning("metadata queue is growing: size=%d", len(pending_meta))
                 continue
 
             if msg.get("type") != "video_frame":
@@ -89,8 +160,8 @@ async def ws_handler(websocket):
                 continue
 
             t0 = now_ms()
-            result_b64 = process_frame(jpeg_b64)
-            if result_b64 is None:
+            result_jpeg = process_frame(jpeg_b64)
+            if result_jpeg is None:
                 logger.warning("frame decode/process failed from %s (seq=%s)", client, seq)
                 continue
 
@@ -103,11 +174,19 @@ async def ws_handler(websocket):
                     now_ms() - t0,
                 )
 
-            response = {
-                "jpeg_base64": result_b64,
-                "process_latency_ms": now_ms() - t0,
-            }
-            await websocket.send(envelope("video_result", "python-server", seq, response))
+            capture_ts_ms = payload.get("capture_ts_ms")
+            if isinstance(capture_ts_ms, (int, float)):
+                capture_ts_ms = int(capture_ts_ms)
+            else:
+                capture_ts_ms = None
+
+            await send_result_binary(
+                websocket=websocket,
+                seq=seq,
+                processed_jpeg=result_jpeg,
+                process_latency_ms=now_ms() - t0,
+                capture_ts_ms=capture_ts_ms,
+            )
     except ConnectionClosed:
         logger.info("client disconnected: %s", client)
         return

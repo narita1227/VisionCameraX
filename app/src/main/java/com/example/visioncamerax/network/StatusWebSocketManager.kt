@@ -6,12 +6,15 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Base64
 import android.util.Log
+import okio.ByteString.Companion.toByteString
+import okio.ByteString
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -28,6 +31,8 @@ class VideoWebSocketManager {
     private val connected = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val frameSeq = AtomicLong(0L)
+    private val pendingResultMeta = ArrayDeque<String>()
+    private val pendingMetaLock = Any()
 
     @Volatile
     private var currentWebSocket: WebSocket? = null
@@ -69,22 +74,56 @@ class VideoWebSocketManager {
                         override fun onMessage(webSocket: WebSocket, text: String) {
                             try {
                                 val json = JSONObject(text)
-                                val payload = json.optJSONObject("payload") ?: return
-                                val jpegBase64 = payload.optString("jpeg_base64", "")
-                                if (jpegBase64.isEmpty()) return
+                                when (json.optString("type")) {
+                                    "video_result_meta" -> {
+                                        val payload = json.optJSONObject("payload") ?: return
+                                        val latency = payload.optDouble("process_latency_ms", 0.0)
+                                        synchronized(pendingMetaLock) {
+                                            pendingResultMeta.addLast(String.format("%.1f", latency))
+                                            if (pendingResultMeta.size > 8) {
+                                                pendingResultMeta.removeFirst()
+                                            }
+                                        }
+                                    }
 
-                                val bytes = Base64.decode(jpegBase64, Base64.DEFAULT)
-                                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
-                                val latency = payload.optDouble("process_latency_ms", 0.0)
+                                    // Legacy fallback for older server mode.
+                                    "video_result" -> {
+                                        val payload = json.optJSONObject("payload") ?: return
+                                        val jpegBase64 = payload.optString("jpeg_base64", "")
+                                        if (jpegBase64.isEmpty()) return
 
-                                mainHandler.post {
-                                    onResult(
-                                        bitmap,
-                                        String.format("%.1f", latency)
-                                    )
+                                        val bytes = Base64.decode(jpegBase64, Base64.DEFAULT)
+                                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+                                        val latency = payload.optDouble("process_latency_ms", 0.0)
+
+                                        mainHandler.post {
+                                            onResult(
+                                                bitmap,
+                                                String.format("%.1f", latency)
+                                            )
+                                        }
+                                    }
                                 }
                             } catch (e: Exception) {
                                 Log.w(TAG, "Failed to parse/process message", e)
+                            }
+                        }
+
+                        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                            try {
+                                val frameBytes = bytes.toByteArray()
+                                val bitmap = BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size)
+                                    ?: return
+
+                                val latency = synchronized(pendingMetaLock) {
+                                    if (pendingResultMeta.isEmpty()) "-" else pendingResultMeta.removeFirst()
+                                }
+
+                                mainHandler.post {
+                                    onResult(bitmap, latency)
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to decode/process binary frame", e)
                             }
                         }
 
@@ -128,22 +167,27 @@ class VideoWebSocketManager {
 
     fun sendFrame(jpegBytes: ByteArray, captureTimestampMs: Long) {
         val ws = currentWebSocket ?: return
+        val seq = frameSeq.incrementAndGet()
+
         val payload = JSONObject().apply {
-            put("jpeg_base64", Base64.encodeToString(jpegBytes, Base64.NO_WRAP))
             put("capture_ts_ms", captureTimestampMs)
         }
 
-        val envelope = JSONObject().apply {
-            put("type", "video_frame")
+        val metaEnvelope = JSONObject().apply {
+            put("type", "video_frame_meta")
             put("source", "android")
             put("timestamp_ms", System.currentTimeMillis())
-            put("seq", frameSeq.incrementAndGet())
+            put("seq", seq)
             put("payload", payload)
         }
 
-        val sent = ws.send(envelope.toString())
-        if (!sent) {
-            Log.w(TAG, "sendFrame failed: websocket send returned false")
+        val sentMeta = ws.send(metaEnvelope.toString())
+        val sentFrame = ws.send(jpegBytes.toByteString())
+        if (!sentMeta || !sentFrame) {
+            Log.w(
+                TAG,
+                "sendFrame failed: metaSent=$sentMeta frameSent=$sentFrame seq=$seq bytes=${jpegBytes.size}",
+            )
         }
     }
 
