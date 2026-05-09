@@ -1,0 +1,31 @@
+# Android / Gradle
+.gradle/
+build/
+app/build/
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Kotlin
+.kotlin/
+
+# Python
+python-server/.venv/
+python-server/venv/
+python-server/env/
+python-server/__pycache__/
+python-server/*.pyc
+python-server/**/*.pyc
+
+# Python build artifacts
+python-server/build/
+python-server/dist/
+python-server/.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
